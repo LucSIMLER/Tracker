@@ -175,6 +175,9 @@ main .view.active{display:block;}
 /* allocation bars */
 .alloc-bar{display:flex;height:10px;border-radius:6px;overflow:hidden;background:var(--panel-2);margin-bottom:12px;}
 .alloc-seg{height:100%;}
+.donut-row{display:flex;align-items:center;gap:22px;flex-wrap:wrap;}
+.donut-row svg{flex:none;}
+.donut-row .alloc-legend{flex:1;min-width:180px;}
 .alloc-legend{display:flex;flex-direction:column;gap:8px;}
 .alloc-row{display:flex;align-items:center;justify-content:space-between;font-size:13px;}
 .alloc-row .lbl{display:flex;align-items:center;gap:8px;color:var(--text-dim);}
@@ -323,11 +326,11 @@ td.num,th.num{font-family:var(--mono);text-align:right;}
       </button>
       <button class="navbtn" data-view="grids">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-        Grilles OKX
+        Grilles spot OKX
       </button>
       <button class="navbtn" data-view="gridsperp">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6"><path d="M3 17l5-6 4 3 5-8 4 5"/><path d="M3 21h18"/></svg>
-        Grilles perp OKX
+        Grilles X Perps OKX
       </button>
     </nav>
     <div class="sidebar-foot">
@@ -501,19 +504,34 @@ async function cgSimplePrice(ids){
   return res.json();
 }
 
-function buildDescriptionFr(detail){
+function buildDescriptionFr(detail, sectorLabel){
   const raw = (detail.description && (detail.description.fr || detail.description.en)) || '';
   const isEnglish = !(detail.description && detail.description.fr);
   let text = raw.replace(/<[^>]*>/g,'').trim();
   const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
   text = sentences.slice(0,3).join(' ');
   if(text.length>420) text = text.slice(0,420).trim()+'…';
-  return { text: text || 'Aucune description disponible.', isEnglish };
+  if(!text){
+    // repli : pas de description CoinGecko pour ce projet, on compose à partir des métadonnées disponibles
+    text = `${detail.name} (${(detail.symbol||'').toUpperCase()}) est classé dans la catégorie ${sectorLabel}. Aucune description détaillée n'est disponible sur CoinGecko pour ce projet — consultez le site officiel pour en savoir plus.`;
+    return { text, isEnglish:false, isFallback:true };
+  }
+  return { text, isEnglish, isFallback:false };
 }
 function buildSector(detail){
   const cats = (detail.categories||[]).filter(Boolean);
-  for(const c of cats){ if(CATEGORY_FR[c]) return CATEGORY_FR[c]; }
-  return cats[0] || 'Non classé';
+  const fr = cats.map(c=>CATEGORY_FR[c]||c);
+  const uniq = [...new Set(fr)];
+  return uniq.slice(0,2).join(' · ') || 'Non classé';
+}
+function formatMarketCap(v){
+  if(!v && v!==0) return null;
+  if(v<=0) return null;
+  try{
+    return new Intl.NumberFormat('fr-FR',{notation:'compact',compactDisplay:'short',style:'currency',currency:'EUR',maximumFractionDigits:1}).format(v);
+  }catch(e){
+    return money(v);
+  }
 }
 
 /* ============================= RENDER: SHELL / NAV ============================= */
@@ -549,6 +567,31 @@ function renderTopbar(){
   }
 }
 
+/* ============================= DONUT CHART (camembert) ============================= */
+const DONUT_PALETTE = ['#c9a24b','#74a98d','#6b8fb5','#b57ab5','#c1614a','#8fa06b','#a0895f','#6ba0a0','#b58f6b','#8a7ab5'];
+function renderDonutChart(container, segments, opts){
+  opts = opts || {};
+  const size = opts.size || 168, thickness = opts.thickness || 20;
+  const total = segments.reduce((s,x)=>s+x.value,0);
+  if(total<=0){ container.innerHTML = `<div class="chart-empty" style="padding:${size/2-14}px 0;">Pas encore de données</div>`; return; }
+  const r = (size-thickness)/2, c = 2*Math.PI*r, cx=size/2, cy=size/2;
+  let offset = 0;
+  const arcs = segments.filter(s=>s.value>0).map(s=>{
+    const frac = s.value/total;
+    const dash = frac*c;
+    const el = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.color}" stroke-width="${thickness}" stroke-dasharray="${dash.toFixed(2)} ${(c-dash).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"><title>${escapeHtml(s.label)} — ${money(s.value)}</title></circle>`;
+    offset += dash;
+    return el;
+  }).join('');
+  const centerLabel = opts.centerLabel || '';
+  const centerSub = opts.centerSub || '';
+  container.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    ${arcs}
+    <text x="50%" y="48%" text-anchor="middle" style="fill:var(--text);font-family:'IBM Plex Mono';font-size:13px;">${escapeHtml(centerLabel)}</text>
+    <text x="50%" y="62%" text-anchor="middle" style="fill:var(--text-faint);font-family:'Inter';font-size:10.5px;">${escapeHtml(centerSub)}</text>
+  </svg>`;
+}
+
 /* ============================= RENDER: DASHBOARD ============================= */
 function renderDashboard(){
   const el = document.getElementById('view-dashboard');
@@ -556,20 +599,14 @@ function renderDashboard(){
   const segs = [
     {label:'Portefeuille (spot)', value:totalSpot(), color:'#c9a24b'},
     {label:'Earn', value:totalEarn(), color:'#74a98d'},
-    {label:'Grilles OKX', value:totalGrids(), color:'#6b8fb5'},
-    {label:'Grilles perp OKX', value:totalGridsPerp(), color:'#b57ab5'},
+    {label:'Grilles spot OKX', value:totalGrids(), color:'#6b8fb5'},
+    {label:'Grilles X Perps OKX', value:totalGridsPerp(), color:'#b57ab5'},
   ];
-  const hasAny = total>0;
-
-  const allocBar = hasAny ? segs.map(s=>{
-    const w = (s.value/total*100)||0;
-    return w>0 ? `<div class="alloc-seg" style="width:${w}%;background:${s.color};"></div>` : '';
-  }).join('') : `<div class="alloc-seg" style="width:100%;background:var(--border);"></div>`;
 
   const allocLegend = segs.map(s=>`
     <div class="alloc-row">
       <span class="lbl"><span class="dot" style="background:${s.color};"></span>${s.label}</span>
-      <span class="amt">${money(s.value)}</span>
+      <span class="amt">${money(s.value)}${total>0?` <span class="hint">(${(s.value/total*100).toFixed(1)}%)</span>`:''}</span>
     </div>`).join('');
 
   const gainers = [...state.spot].filter(a=>a.change24h!==undefined && a.change24h!==null).sort((a,b)=>b.change24h-a.change24h).slice(0,4);
@@ -585,8 +622,10 @@ function renderDashboard(){
     <div class="grid cols-2" style="margin-bottom:16px;">
       <div class="card">
         <h3>Répartition du portefeuille</h3>
-        <div class="alloc-bar">${allocBar}</div>
-        <div class="alloc-legend">${allocLegend}</div>
+        <div class="donut-row">
+          <div id="dashboard-donut"></div>
+          <div class="alloc-legend">${allocLegend}</div>
+        </div>
       </div>
       <div class="card">
         <h3>Mouvements 24h (spot)</h3>
@@ -612,6 +651,7 @@ function renderDashboard(){
     </div>
   `;
   renderHistoryChart(document.getElementById('history-chart'));
+  renderDonutChart(document.getElementById('dashboard-donut'), segs, {centerLabel: money(total).replace('\u00A0€',''), centerSub:'total'});
 }
 
 function renderHistoryChart(container){
@@ -667,6 +707,13 @@ function renderSpot(){
       <button class="btn primary" id="btn-add-spot">+ Ajouter un actif</button>
     </div>
     ${rows.length===0 ? `<div class="empty-state">Aucun actif pour l'instant.<div class="hint">Ajoutez un actif pour connaître son secteur, sa description et suivre sa valeur.</div></div>` : `
+    ${rows.length>=2 ? `<div class="card" style="margin-bottom:16px;">
+      <h3>Répartition par actif</h3>
+      <div class="donut-row">
+        <div id="spot-donut"></div>
+        <div class="alloc-legend" id="spot-donut-legend"></div>
+      </div>
+    </div>` : ''}
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Actif</th><th>Secteur</th><th class="num">Quantité</th><th class="num">Prix moyen</th><th class="num">Prix actuel</th><th class="num">24h</th><th class="num">Valeur</th><th class="num">P&L</th><th></th>
@@ -689,12 +736,24 @@ function renderSpot(){
               <button class="icon-btn btn-del" title="Supprimer" data-id="${a.id}"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></button>
             </div></td>
           </tr>
-          <tr class="desc-row hidden" id="desc-${a.id}" style="display:none;"><td colspan="9">${escapeHtml(a.description||'')}${a.descIsEnglish?'<div class="desc-note">Description originale en anglais (non traduite automatiquement).</div>':''}</td></tr>`;
+          <tr class="desc-row hidden" id="desc-${a.id}" style="display:none;"><td colspan="9">${escapeHtml(a.description||'')}${formatMarketCap(a.marketCap)?` <span class="desc-note" style="display:inline;">· Cap. marché : ${formatMarketCap(a.marketCap)}</span>`:''}${a.homepage?` <span class="desc-note" style="display:inline;">· <a href="${escapeHtml(a.homepage)}" target="_blank" rel="noopener">Site officiel →</a></span>`:''}${a.descIsEnglish?'<div class="desc-note">Description originale en anglais (non traduite automatiquement).</div>':''}</td></tr>`;
         }).join('')}
       </tbody>
     </table></div>`}
   `;
   document.getElementById('btn-add-spot').addEventListener('click', ()=>openAssetModal('spot'));
+  if(rows.length>=2){
+    const sorted = [...rows].map(a=>({label:`${a.name} (${a.symbol})`, value:spotValue(a)})).sort((a,b)=>b.value-a.value);
+    const top = sorted.slice(0,7);
+    const restVal = sorted.slice(7).reduce((s,x)=>s+x.value,0);
+    const segs = top.map((s,i)=>({...s, color:DONUT_PALETTE[i%DONUT_PALETTE.length]}));
+    if(restVal>0) segs.push({label:`Autres (${sorted.length-7})`, value:restVal, color:'#4a5a62'});
+    renderDonutChart(document.getElementById('spot-donut'), segs, {centerSub: rows.length+' actifs'});
+    document.getElementById('spot-donut-legend').innerHTML = segs.map(s=>{
+      const totalSpotVal = totalSpot();
+      return `<div class="alloc-row"><span class="lbl"><span class="dot" style="background:${s.color};"></span>${escapeHtml(s.label)}</span><span class="amt">${money(s.value)} <span class="hint">(${totalSpotVal>0?(s.value/totalSpotVal*100).toFixed(1):'0'}%)</span></span></div>`;
+    }).join('');
+  }
   el.querySelectorAll('.btn-info').forEach(b=>b.addEventListener('click', ()=>{
     const row = document.getElementById('desc-'+b.dataset.id);
     row.style.display = row.style.display==='none' ? '' : 'none';
@@ -763,8 +822,8 @@ function renderGridsGeneric(kind){
   el.innerHTML = `
     <div class="section-head">
       <div>
-        <h1>${isPerp?'Grilles perp OKX':'Grilles OKX'}</h1>
-        <p class="sub">${isPerp?'Bots de grille sur contrats perpétuels OKX':'Bots de grille spot OKX'}</p>
+        <h1>${isPerp?'Grilles X Perps OKX':'Grilles spot OKX'} <span class="sector-tag" style="color:${isPerp?'#b57ab5':'#6b8fb5'};border-color:${isPerp?'#4a2f4a':'#2a3a4a'};">${isPerp?'Futures à effet de levier':'Sans effet de levier'}</span></h1>
+        <p class="sub">${isPerp?"Bots de grille sur contrats à terme perpétuels (X Perps) OKX — position avec effet de levier, gains/pertes amplifiés, liquidation possible.":"Bots de grille classiques OKX sur le marché au comptant — vous détenez réellement l'actif, pas d'effet de levier ni de liquidation."}</p>
       </div>
       <button class="btn primary" id="btn-add-grid">+ Ajouter une grille</button>
     </div>
@@ -883,28 +942,31 @@ async function selectCoin(id, kind){
   resultsBox.innerHTML = `<div class="search-status">Chargement des informations…</div>`;
   try{
     const detail = await cgCoinDetail(id);
-    const { text, isEnglish } = buildDescriptionFr(detail);
     const sector = buildSector(detail);
+    const { text, isEnglish, isFallback } = buildDescriptionFr(detail, sector);
     const price = detail.market_data?.current_price?.eur ?? null;
     const change24h = detail.market_data?.price_change_percentage_24h ?? null;
+    const marketCap = detail.market_data?.market_cap?.eur ?? null;
+    const homepage = (detail.links?.homepage||[]).find(u=>u) || null;
     pendingCoin = {
       id: detail.id,
       name: detail.name,
       symbol: (detail.symbol||'').toUpperCase(),
-      sector, description: text, descIsEnglish: isEnglish,
-      price, change24h, thumb: detail.image?.thumb || ''
+      sector, description: text, descIsEnglish: isEnglish, descIsFallback: isFallback,
+      price, change24h, marketCap, homepage, thumb: detail.image?.thumb || ''
     };
     resultsBox.innerHTML = '';
     document.getElementById('asset-search-input').value = detail.name;
     renderSelectedAsset(kind);
   }catch(err){
-    resultsBox.innerHTML = `<div class="search-status">Impossible de charger les détails. Réessayez ou saisissez manuellement.</div>`;
+    resultsBox.innerHTML = `<div class="search-status">Impossible de charger les détails (${err.message||'erreur'}). Réessayez ou saisissez manuellement.</div>`;
   }
 }
 
 function renderSelectedAsset(kind){
   const block = document.getElementById('selected-asset-block');
   const c = pendingCoin;
+  const mcap = formatMarketCap(c.marketCap);
   block.innerHTML = `
     <div class="selected-asset">
       ${c.thumb?`<img src="${c.thumb}" alt="">`:''}
@@ -912,7 +974,9 @@ function renderSelectedAsset(kind){
         <div class="sa-name">${escapeHtml(c.name)} <span class="asym">${escapeHtml(c.symbol)}</span></div>
         <div class="sa-sector">${escapeHtml(c.sector)}</div>
         <div class="sa-desc">${escapeHtml(c.description)}</div>
-        <div class="sa-price">Prix actuel : ${c.price!==null?moneyPrecise(c.price):'indisponible'}</div>
+        ${c.descIsFallback?`<div class="desc-note">${c.homepage?`<a href="${escapeHtml(c.homepage)}" target="_blank" rel="noopener">Voir le site officiel →</a>`:'Pas de site officiel référencé.'}</div>`:''}
+        <div class="sa-price">Prix actuel : ${c.price!==null?moneyPrecise(c.price):'indisponible'}${mcap?` · Cap. marché : ${mcap}`:''}</div>
+        ${(!c.descIsFallback && c.homepage)?`<div class="desc-note"><a href="${escapeHtml(c.homepage)}" target="_blank" rel="noopener">Site officiel →</a></div>`:''}
       </div>
     </div>`;
   document.getElementById('asset-extra-fields').style.display = '';
@@ -954,6 +1018,7 @@ function saveNewAsset(kind){
     state.spot.push({
       id: uid(), cgId: pendingCoin.id, name: pendingCoin.name, symbol: pendingCoin.symbol,
       sector: pendingCoin.sector, description: pendingCoin.description, descIsEnglish: pendingCoin.descIsEnglish,
+      marketCap: pendingCoin.marketCap||null, homepage: pendingCoin.homepage||null,
       quantity, avgPrice: second, currentPrice: pendingCoin.price, change24h: pendingCoin.change24h
     });
   } else {
@@ -961,6 +1026,8 @@ function saveNewAsset(kind){
     const startDate = document.getElementById('f-startdate')?.value || todayStr();
     state.earn.push({
       id: uid(), cgId: pendingCoin.id, name: pendingCoin.name, symbol: pendingCoin.symbol,
+      sector: pendingCoin.sector, description: pendingCoin.description, descIsEnglish: pendingCoin.descIsEnglish,
+      marketCap: pendingCoin.marketCap||null, homepage: pendingCoin.homepage||null,
       quantity, apy: second, platform, startDate, currentPrice: pendingCoin.price
     });
   }
